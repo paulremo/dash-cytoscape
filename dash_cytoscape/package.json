@@ -50,7 +50,8 @@
     "lodash": "^4.17.21",
     "ramda": "^0.29.1",
     "react-cytoscapejs": "2.0.0",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "cytoscape-expand-collapse": "4.1.1"
   },
   "devDependencies": {
     "@babel/core": "^7.23.9",

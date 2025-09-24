@@ -15,16 +15,55 @@ import '@ungap/custom-elements';
 
 const cytoscape = require('cytoscape');
 const contextMenus = require('cytoscape-context-menus');
+const expandCollapse = require('cytoscape-expand-collapse');
 
 // Clientside callback functions for CyLeaflet AIO component
 import '../cyleaflet_clientside.js';
 
 // register extension
 contextMenus(cytoscape);
+expandCollapse(cytoscape);
 /**
  * A Component Library for Dash aimed at facilitating network visualization in
  * Python, wrapped around [Cytoscape.js](http://js.cytoscape.org/).
  */
+ 
+// Strip expand-collapse internals from any data object/array we send out
+const stripPluginFields = (val) => {
+  if (val == null) return val;
+  if (Array.isArray(val)) return val.map(stripPluginFields);
+  if (typeof val === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(val)) {
+      if (k === 'collapsedChildren' || k === 'originalEnds') continue; // 🚫
+      out[k] = stripPluginFields(v);
+    }
+    return out;
+  }
+  return val;
+};
+
+// Accepts either array form or {nodes, edges} form and returns the same shape,
+// but with .data sanitized (recursively) on every element.
+const sanitizeElementsProp = (els) => {
+  if (!els) return [];
+
+  if (Array.isArray(els)) {
+    return els.map(e => ({
+      ...e,
+      // only touch data; keep position, classes, etc. intact
+      data: stripPluginFields(e.data),
+    }));
+  }
+
+  // Object form: { nodes: [], edges: [] }
+  return {
+    nodes: (els.nodes || []).map(n => ({ ...n, data: stripPluginFields(n.data) })),
+    edges: (els.edges || []).map(e => ({ ...e, data: stripPluginFields(e.data) })),
+  };
+};
+
+ 
 class Cytoscape extends Component {
     constructor(props) {
         super(props);
@@ -46,23 +85,15 @@ class Cytoscape extends Component {
             relativePosition = ele.relativePosition(),
             parent = ele.parent(),
             style = ele.style();
-
+            
         // Trim down the element objects to only the data contained
-        const edgesData = ele.connectedEdges().map((ele) => {
-            return ele.data();
-        });
-        const childrenData = ele.children().map((ele) => {
-            return ele.data();
-        });
-        const ancestorsData = ele.ancestors().map((ele) => {
-            return ele.data();
-        });
-        const descendantsData = ele.descendants().map((ele) => {
-            return ele.data();
-        });
-        const siblingsData = ele.siblings().map((ele) => {
-            return ele.data();
-        });
+        const cleanData = (d) => stripPluginFields(d) || {};
+        const edgesData = ele.connectedEdges().map(e => stripPluginFields(e.data()));
+
+        const childrenData = ele.children().map((e) => cleanData(e.data()));
+        const ancestorsData = ele.ancestors().map((e) => cleanData(e.data()));
+        const descendantsData = ele.descendants().map((e) => cleanData(e.data()));
+        const siblingsData = ele.siblings().map((e) => cleanData(e.data()));
 
         const {timeStamp} = event;
         const {
@@ -76,12 +107,7 @@ class Cytoscape extends Component {
             selectable,
         } = ele.json();
 
-        let parentData;
-        if (parent) {
-            parentData = parent.data();
-        } else {
-            parentData = null;
-        }
+        let parentData = parent ? cleanData(parent.data()) : null;
 
         const nodeObject = {
             // Nodes attributes
@@ -90,7 +116,7 @@ class Cytoscape extends Component {
             timeStamp,
             // From ele.json()
             classes,
-            data,
+            data: cleanData(data),
             grabbable,
             group,
             locked,
@@ -135,14 +161,14 @@ class Cytoscape extends Component {
             isLoop,
             isSimple,
             midpoint,
-            sourceData,
+            sourceData: stripPluginFields(ele.source().data()),
             sourceEndpoint,
-            targetData,
+            targetData: stripPluginFields(ele.target().data()),
             targetEndpoint,
             timeStamp,
             // From ele.json()
             classes,
-            data,
+            data: stripPluginFields(data),
             grabbable,
             group,
             locked,
@@ -164,6 +190,23 @@ class Cytoscape extends Component {
         this._cy = cy;
         window.cy = cy;
         this._handleCyCalled = true;
+        
+        // Enable expand-collapse
+        let api = cy.expandCollapse({
+          layoutBy: {
+                "name": "dagre",
+                "directed": true,
+                "rankDir": "BT"
+            },
+          fisheye: true,
+          animate: false,
+          undoable: false
+        });
+        
+        // Ensure we re-snapshot elements when expand/collapse changes data
+        cy.on('expandcollapse.aftercollapse expandcollapse.afterexpand', () => {
+          updateElements();
+        });
 
         // ///////////////////////////////////// CONSTANTS /////////////////////////////////////////
         const SELECT_THRESHOLD = 100;
@@ -195,7 +238,7 @@ class Cytoscape extends Component {
                added/removed from the selectedNodes collection, and then updates
                the selectedNodeData prop.
                */
-            const nodeData = selectedNodes.map((el) => el.data());
+            const nodeData = selectedNodes.map(el => stripPluginFields(el.data()));
 
             this.props.setProps({
                 selectedNodeData: nodeData,
@@ -203,7 +246,7 @@ class Cytoscape extends Component {
         }, SELECT_THRESHOLD);
 
         const sendSelectedEdgesData = _.debounce(() => {
-            const edgeData = selectedEdges.map((el) => el.data());
+            const edgeData = selectedEdges.map(el => stripPluginFields(el.data()));
 
             this.props.setProps({
                 selectedEdgeData: edgeData,
@@ -219,16 +262,12 @@ class Cytoscape extends Component {
         const updateElements = _.debounce(() => {
             this.props.setProps({
                 elements: cy.elements('').map((item) => {
-                    if (item.json().group === 'nodes') {
-                        return {
-                            data: item.json().data,
-                            position: item.json().position,
-                        };
+                    const j = item.json();
+                    const cleaned = stripPluginFields(j.data);
+                    if (j.group === 'nodes') {
+                      return { data: cleaned, position: j.position };
                     }
-                    return {
-                        data: item.json().data,
-                        position: void 0,
-                    };
+                    return { data: cleaned, position: void 0 };
                 }),
             });
         }, UPDATE_ELEMENTS_THRESHOLD);
@@ -293,17 +332,13 @@ class Cytoscape extends Component {
 
         cy.on('mouseover', 'node', (event) => {
             this.props.setProps({
-                mouseoverNodeData: Object.assign({}, event.target.data(), {
-                    timeStamp: event.timeStamp,
-                }),
+                mouseoverNodeData: { ...stripPluginFields(event.target.data()), timeStamp: event.timeStamp },
             });
         });
 
         cy.on('mouseover', 'edge', (event) => {
             this.props.setProps({
-                mouseoverEdgeData: Object.assign({}, event.target.data(), {
-                    timeStamp: event.timeStamp,
-                }),
+                mouseoverEdgeData: { ...stripPluginFields(event.target.data()), timeStamp: event.timeStamp },
             });
         });
 
@@ -359,10 +394,6 @@ class Cytoscape extends Component {
 
         cy.on('resize viewport', () => {
             setExtent(cy.extent());
-        });
-
-        cy.on('tapstart', () => {
-            resize();
         });
 
         // Refresh layout if current zoom is out of boundaries
@@ -716,6 +747,11 @@ class Cytoscape extends Component {
             // Responsive graphs
             responsive,
         } = this.props;
+        
+        // Sanitize BEFORE giving to CytoscapeComponent
+        const sanitizedElements = CytoscapeComponent.normalizeElements(
+          sanitizeElementsProp(elements)
+        );
 
         if (Object.keys(generateImage).length > 0) {
             // If no cytoscape object has been created yet, an image cannot be generated,
@@ -741,7 +777,7 @@ class Cytoscape extends Component {
                 cy={this.handleCy}
                 className={className}
                 style={style}
-                elements={CytoscapeComponent.normalizeElements(elements)}
+                elements={sanitizedElements}
                 stylesheet={stylesheet}
                 layout={layout}
                 contextMenu={contextMenu}
